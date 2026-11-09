@@ -1,66 +1,55 @@
-# name: CICD
 
-# on:
-#     push:
-#         branches: [main]
-
-# job:
-#     build:
-#         steps:
-#             - name: Checkout Source
-#               uses: actions/checkout@v3
-
-#               -name: Login to docker hub
-#               run: docker login -u username -p password
-            
-#             - name: Set up Node.js
-#               uses: actions/setup-node@v4
-#               with:
-#                   node-version: '18'
-
-#             - name: Install Dependencies
-#               run: npm install
-
-#             - name: Build Docker Image
-#               run: docker build -t my-node-app .
-
-#             - name: Run Docker Container
-#               run: docker run -p 5000:5000 my-node-app
-
-name: Node.js CICD Pipeline
+name: Node.js CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
+
+  # JOB 1: Test the Node.js application
   build:
+    name: Build and Test
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18.x'
+          node-version: '22'
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests (optional)
-        run: npm test
-        continue-on-error: true
+      - name: Run tests
+        run: npm test --if-present
 
+      - name: Build application
+        run: npm run build --if-present
+
+
+  # JOB 2: Build and push Docker image
   build-docker:
+    name: Build and Push Docker Image
     needs: build
     runs-on: ubuntu-latest
 
+    # Never push images from pull requests
+    if: github.event_name == 'push'
+
     steps:
-      - name: Checkout code
+      - name: Checkout source code
         uses: actions/checkout@v4
 
       - name: Login to Docker Hub
@@ -77,17 +66,42 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/my-node-app:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/nodejs-app:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/nodejs-app:${{ github.sha }}
 
-  deploy-staging:
+
+  # JOB 3: Deploy to AWS EC2
+  deploy:
+    name: Deploy to AWS EC2
     needs: build-docker
-    runs-on: ubuntu-latest
+
+    runs-on: [self-hosted, linux, x64, aws-ec2]
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Deploy to Staging (Manual)
+      - name: Pull Docker image
         run: |
-          echo "✅ Deploying to Staging at $(date)"
-          echo "✅ Changes:"
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nodejs-app:${{ github.sha }}
+
+      - name: Stop and remove old container
+        run: |
+          docker rm -f nodejs-app-container || true
+
+      - name: Start new container
+        run: |
+          docker run -d \
+            --name nodejs-app-container \
+            --restart unless-stopped \
+            -p 5000:5000 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/nodejs-app:${{ github.sha }}
+
+      - name: Verify deployment
+        run: |
+          sleep 5
+          docker ps --filter name=nodejs-app-container
+          docker logs --tail 50 nodejs-app-container
+
+          if [ "$(docker inspect -f '{{.State.Running}}' nodejs-app-container)" != "true" ]; then
+            echo "Container failed to start"
+            exit 1
+          fi
