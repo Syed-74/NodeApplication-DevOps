@@ -63,6 +63,7 @@ const Mutation = new GraphQLObjectType({
 })
 
 const schema = new GraphQLSchema({query: RootQuery, mutation: Mutation})
+console.log(schema)
 app.use("/graphql", graphqlHTTP({
     schema,
     graphiql: true,
